@@ -14,46 +14,52 @@ struct Point {
     position: (hFloat, hFloat),
     previous_position: (hFloat, hFloat),
     velocity: (hFloat, hFloat),
-    mass: f32,
+    mass: lFloat,
 }
 
 impl Point {
     fn new(position: (hFloat, hFloat), velocity: (hFloat, hFloat), mass: lFloat) -> Self {
         Point { 
             position, 
-            previous_position: 
+            previous_position: (position.0 - velocity.0 * dt, position.1 - velocity.1 * dt),
             velocity,
             mass,
         }
     }
 }
 
-fn calculate_force_between_points(point1: &Point, point2: (hFloat, hFloat, f32)) -> (hFloat, hFloat) {
-    let dx: hFloat = (point2.0 - point1.position.0) * DISTNCE_SCALE;
-    let dy: hFloat = (point2.1 - point1.position.1) * DISTNCE_SCALE;
-    let distance = (dx * dx + dy * dy).sqrt();
+fn newtons_gravity(
+    point1: (hFloat, hFloat), point2: (hFloat, hFloat),
+    mass1: lFloat, mass2: lFloat
+) -> (hFloat, hFloat) {
+    let dx = (point2.0 - point1.0) * DISTNCE_SCALE;
+    let dy = (point2.1 - point1.1) * DISTNCE_SCALE;
 
-    if distance <= CUTOFF {
-        (0.0, 0.0)
-    } 
-    else {
-        let soft_distance = (distance * distance + EPSILON * EPSILON).sqrt();
-        let force = G * (point1.mass * point2.2 as f32) as hFloat / (soft_distance * soft_distance);
-        let fx = force * dx / soft_distance;
-        let fy = force * dy / soft_distance;
-        (fx, fy)
+    let distance_squared = dx * dx + dy * dy;
+
+    if distance_squared <= CUTOFF * CUTOFF {
+        return (0.0, 0.0);
     }
+
+    // Soft distance with epsilon to prevent division by zero
+    let soft_distance = (distance_squared + EPSILON * EPSILON).sqrt();
+    let force = G * (mass1 * mass2) as hFloat / (soft_distance * soft_distance);
+
+    // Calculate force components
+    let fx = force * dx / soft_distance;
+    let fy = force * dy / soft_distance;
+
+    (fx, fy)
 }
 
-
-fn calculate_distance(p1: &Point, p2: (f64, f64)) -> f64 {
-    let dx = (p2.0 - p1.position.0) * DISTNCE_SCALE;
-    let dy = (p2.1 - p1.position.1) * DISTNCE_SCALE;
+fn distance(p1: (hFloat, hFloat), p2: (hFloat, hFloat)) -> hFloat {
+    let dx = (p2.0 - p1.0) * DISTNCE_SCALE;
+    let dy = (p2.1 - p1.1) * DISTNCE_SCALE;
 
     (dx * dx + dy * dy).sqrt()
 }
 
-fn add_com(com: (f64, f64, f32), com_to_add: (f64, f64, f32)) -> (f64, f64, f32) {
+fn add_con(com: (f64, f64, f32), com_to_add: (f64, f64, f32)) -> (f64, f64, f32) {
     let mass_sum = (com.2 + com_to_add.2) as f64;
     
     ((com.0 * com.2 as f64 + com_to_add.0 * com_to_add.2 as f64) / mass_sum, 
@@ -68,7 +74,8 @@ struct Quadtree {
     boundary: Rectangle,
     point: Option<Point>,
     children: Option<Box<[Quadtree; 4]>>,
-    center_of_mass: (f64, f64, f32),
+    center_of_mass: (hFloat, hFloat),
+    total_mass: lFloat,
 }
 
 impl Quadtree {
@@ -77,7 +84,8 @@ impl Quadtree {
             boundary,
             point: None,
             children: None,
-            center_of_mass: (0.0, 0.0, 0.0),
+            center_of_mass: (0.0, 0.0),
+            total_mass: 0.0,
         }
     }
 
@@ -85,9 +93,11 @@ impl Quadtree {
         if !self.boundary.contains(&point) {
             return;
         }
-        // compute COM
-        let point_com = (point.position.0, point.position.1, point.mass);
-        self.center_of_mass = add_com(self.center_of_mass, point_com);
+        // update center of mass using weighted average
+        self.center_of_mass = (
+            (self.center_of_mass.0 * self.total_mass as hFloat + point.position.0 * point.mass as hFloat) / (self.total_mass as hFloat + point.mass as hFloat),
+            (self.center_of_mass.1 * self.total_mass as hFloat + point.position.1 * point.mass as hFloat) / (self.total_mass as hFloat + point.mass as hFloat),
+        );
 
         // has point => subdivide and put new point into created children, set the self.point to none
         if let Some(stored_point) = self.point.take() {
@@ -134,22 +144,21 @@ impl Quadtree {
     }
 
 
-    fn compute_force_sum(&self, active_point: &Point) -> (f32, f32) {
+    fn compute_force_sum(&self, active_point: &Point) -> (hFloat, hFloat) {
         // this function is intended only to be called on main parent node (the one capturing all other nodes) => it has to have reach to every point
         let mut force_vector = (0.0, 0.0);
         
         // if the main parent has point in it => based on the structure of quadtree that point is the only point => calculate force and return it
         if let Some(ref point) = self.point {
-            let force = calculate_force_between_points(active_point, (point.position.0, point.position.1, point.mass));
-            return (force.0 as f32, force.1 as f32);
+            let force = newtons_gravity(active_point.position, point.position, active_point.mass, point.mass);
+            return (force.0 as hFloat, force.1 as hFloat);
         }
-         // aprox
-        let node_avarage = self.center_of_mass;
-        let distance = calculate_distance(active_point, (node_avarage.0, node_avarage.1));
+        // if the distance between the center of mass and the active point is small enough, approximate the force
+        let distance = distance(active_point.position, self.center_of_mass);
 
         if (self.boundary.width / distance) < DELTA as f64 {
-            let force = calculate_force_between_points(active_point, node_avarage);
-            return (force.0 as f32, force.1 as f32);
+            let force = newtons_gravity(active_point.position, self.center_of_mass, active_point.mass, self.total_mass);
+            return (force.0 as hFloat, force.1 as hFloat);
             // println!("aprox done, point count: {}", self.get_pointer_array().len());
             // println!("pos: {:?}, mass: {}", (node_avarage.0, node_avarage.1), node_avarage.2);
         }
@@ -163,22 +172,18 @@ impl Quadtree {
         }
         force_vector
     }
-
-
-
-     
 }
 
 #[derive(Debug, Copy, Clone)]
 struct Rectangle {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+    x: hFloat,
+    y: hFloat,
+    width: hFloat,
+    height: hFloat,
 }
 
 impl Rectangle {
-    fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
+    fn new(x: hFloat, y: hFloat, width: hFloat, height: hFloat) -> Self {
         Rectangle { x, y, width, height }
     }
 
@@ -194,10 +199,10 @@ static CUTOFF: f64 = 0.0001; // Cutoff distance for force calculation
 static EPSILON: f64 = 2.0; // Softening parameter
 static DISTNCE_SCALE: f64 = 8.0; // Scale factor for distance calculation
 static MASS_DIVERSITY: f32 = 0.0; // Mass diversity for random point generation
+static dt: f64 = 50.0; // Time step for Verlet integration
 
 fn main() {
     let point_count = 10000;
-    let dt: f64 = 50.0;
     let frames = 5000;
     let image_size = (800, 800);
 
@@ -205,14 +210,14 @@ fn main() {
     let mut points: Vec<Point> = Vec::new();
 
     for _i in 1..point_count {
-        let radius = rng.gen::<f64>() * 45.0;
-        let theta: f64 = rng.gen::<f64>() * 2.0 * PI;
+        let radius = rng.gen::<hFloat>() * 45.0;
+        let theta: f64 = rng.gen::<hFloat>() * 2.0 * PI;
         let (mut x, mut y) = (theta.cos() * radius, theta.sin() * radius);
         let velocity_scalar = (0.00001 / radius / radius).sqrt();
-        let velocity = ((-y * velocity_scalar) as f32, (x * velocity_scalar) as f32);
+        let velocity = (-y * velocity_scalar, x * velocity_scalar);
         x += 50.;
         y += 50.;
-        let mut point: Point = Point::new((x, y));
+        let mut point: Point = Point::new((x, y), velocity, 1.0);
         point.mass = rng.gen::<f32>() * MASS_DIVERSITY + 1.0;
         point.velocity = velocity;
         points.push(point);
@@ -245,16 +250,16 @@ fn main() {
         .filter_map(|point| {
 
             let force = quadtree.compute_force_sum(point);
-            let acceleration = (force.0 / point.mass, force.1 / point.mass);
+            let acceleration = (force.0 / point.mass as hFloat, force.1 / point.mass as hFloat);
 
             point.previous_position = (
-                point.position.0 - point.velocity.0 as f64 * dt,
-                point.position.1 - point.velocity.1 as f64 * dt,
+                point.position.0 - point.velocity.0 as hFloat * dt,
+                point.position.1 - point.velocity.1 as hFloat * dt,
             );
 
             // Update position using the Verlet integration formula
-            let new_position_0 = 2.0 * point.position.0 - point.previous_position.0 + acceleration.0 as f64 * dt * dt;
-            let new_position_1 = 2.0 * point.position.1 - point.previous_position.1 + acceleration.1 as f64 * dt * dt;
+            let new_position_0 = 2.0 * point.position.0 - point.previous_position.0 + acceleration.0 as hFloat * dt * dt;
+            let new_position_1 = 2.0 * point.position.1 - point.previous_position.1 + acceleration.1 as hFloat * dt * dt;
 
             // Optionally, compute the velocity (for diagnostics or other uses)
             let new_velocity_0 = (new_position_0 - point.previous_position.0) / (2.0 * dt);
@@ -263,7 +268,7 @@ fn main() {
             // Update point state
             point.previous_position = point.position; // Save the current position as the previous one
             point.position = (new_position_0, new_position_1); // Update the current position
-            point.velocity = (new_velocity_0 as f32, new_velocity_1 as f32); // Optionally update the velocity (not strictly needed for Verlet)
+            point.velocity = (new_velocity_0 as hFloat, new_velocity_1 as hFloat); // Optionally update the velocity (not strictly needed for Verlet)
 
             // Return the point only if it is within the quadtree boundary
             if quadtree.boundary.contains(point) {
@@ -294,7 +299,7 @@ fn main() {
             let pixel_index = (pixel_y as usize * image_size.0 as usize + pixel_x as usize) as usize;
 
             let point_velocity_magnitude = (point.velocity.0.powf(2.0) + point.velocity.1.powf(2.0)).sqrt();
-            let point_energy = point.mass * point_velocity_magnitude.powf(2.0) / 2.0;
+            let point_energy = point.mass as f64 * point_velocity_magnitude.powf(2.0) / 2.0;
             energy_map[pixel_index] += point_energy;
 
             let pixel_color = buffer[pixel_index] + packed_color;
